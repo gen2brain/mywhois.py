@@ -1,0 +1,10 @@
+Usage: mywhois.py <options> <args>
+
+
+Options:
+  -h, --help            show this help message and exit
+  --raw                 print raw whois response
+  --tor                 use tor (the onion router) proxy
+  --tor-server=TOR_SERVER
+                        tor server ip address.
+  --tor-port=TOR_PORT   tor server port number.
