@@ -19,9 +19,9 @@
 import os
 import re
 import sys
-import time
 from commands import getoutput
 from optparse import OptionParser
+from Queue import Queue
 from threading import Thread
 
 SOCKS_PORT = 9050
@@ -43,7 +43,7 @@ REGISTRAR_RE = [
     re.compile('registrant:\s*(.+)'),
     re.compile('REGISTRAR:\s*\n(.+)'),
     re.compile('Registrar\s*\n\s*Organization:\s*(.+)'),
-    re.compile('Organisation:\s*(.+)'),
+    re.compile('Type:\s*ROLE|PERSON\s*\nName:\s*(.+)'),
     re.compile('owner:\s*(.+)'),
     re.compile('Holder of domain name:\s*\n(.+)'),
     re.compile('Admin-name\s*(.+)'),
@@ -84,6 +84,11 @@ class Whois():
             self.domainname = domainname
         self.domainext = self.domainname.rsplit('.')[-1]
 
+        if self.domainext in ['de']:
+            self.query = '-T dn %s' % self.domainname
+        else:
+            self.query = self.domainname
+
         self.url = None
         self.error = None
         self.server = self.get_server()
@@ -110,36 +115,47 @@ class Whois():
                 method = 'socket'
                 self.server = 'whois.nic.ve'
             elif self.domainext == 'ph':
-                self.error = "for 'ph' domains go to http://www.dot.ph/whois\n"
+                self.error = "for 'ph' domains go to http://www.dot.ph/whois"
             else:
-                self.error = "whois server not found for '%s' domain.\n" % (
+                self.error = "whois server not found for '%s' domain." % (
                         self.domainext)
         else:
             if self.domainext == 'es':
-                self.error = "for 'es' domains go to https://www.nic.es\n"
+                self.error = "for 'es' domains go to https://www.nic.es"
+            elif self.domainext == 'hu':
+                self.error = "for 'hu' domains go to http://www.domain.hu/domain/English/domainsearch"
             else:
                 method = 'socket'
         return method
 
 class Worker(Thread):
     """ Threadable class allowing parallel sessions """
+
     def __init__(self, whois, opts):
         Thread.__init__(self)
         self.opts = opts
         self.domainname = whois.domainname
         self.server = whois.server
         self.method = whois.method
+        self.query = whois.query
         self.url = whois.url
         self.error = whois.error
 
     def get_http_response(self):
         """Returns data from web whois"""
+        response = ''
         try:
-            response = urllib2.urlopen(self.url)
-            data = response.read()
-            return re.sub('<[^<]+?>', '', data)
+            user_agent = 'Mozilla/4.0 (compatible; MSIE 6.1; Windows XP)'
+            req = urllib2.Request(self.url, headers={'User-Agent': user_agent})
+            url = urllib2.urlopen(req)
+            while True:
+                data = url.read(1024)
+                if not data: break
+                response += data
+            url.close()
         except Exception, err:
-            self.error = "%s: %s\n" % (self.url, str(err))
+            self.error = "%s: %s" % (self.url, str(err))
+        return re.sub('<[^<]+?>', '', response)
 
     def get_socket_response(self):
         """Returns data from whois server"""
@@ -147,14 +163,14 @@ class Worker(Thread):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((self.server, 43))
-            sock.send("%s\r\n" % self.domainname)
+            sock.send("%s\r\n" % self.query)
             while True:
                 data = sock.recv(1024)
                 if not data: break
                 response += data
             sock.close()
         except Exception, err:
-            self.error = "%s: %s\n" % (self.server, str(err))
+            self.error = "%s: %s" % (self.server, str(err))
         return response
 
     def parse_response(self, response):
@@ -192,10 +208,12 @@ class Worker(Thread):
                 results = "\n%s" % response
             else:
                 registrar, nameservers = self.parse_response(response)
-                results = "Registrar: %s\nNameservers: %s" % (
+                results = "Registrar: %s\nNameservers: %s\n" % (
                         ", ".join(registrar), ", ".join(nameservers))
-        sys.stdout.write("%s\n%s\n\n" % (self.domainname, results))
-        time.sleep(1)
+        else:
+            if self.error:
+                results = "Error: %s\n" % self.error
+        sys.stdout.write("%s\n%s\n" % (self.domainname, results))
 
 
 def parse_args():
@@ -231,15 +249,28 @@ def parse_args():
     return opts, args
 
 def main(opts, args):
-    threads = []
-    for arg in args:
-        whois = Whois(arg)
-        thread = Worker(whois, opts)
-        thread.start()
-        threads.append(thread)
 
-    for thread in threads:
-        thread.join()
+    def producer(queue, args):
+        for arg in args:
+            whois = Whois(arg)
+            thread = Worker(whois, opts)
+            thread.start()
+            queue.put(thread, True)
+
+    def consumer(queue, total):
+        finished = 0
+        while finished < total:
+            thread = queue.get(True)
+            thread.join()
+            finished += 1
+
+    queue = Queue(5)
+    prod_thread = Thread(target=producer, args=(queue, args))
+    cons_thread = Thread(target=consumer, args=(queue, len(args)))
+    prod_thread.start()
+    cons_thread.start()
+    prod_thread.join()
+    cons_thread.join()
 
 
 if __name__ == '__main__':
